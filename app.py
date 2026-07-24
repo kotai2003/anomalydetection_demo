@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import base64
 import math
 from pathlib import Path
 
@@ -43,6 +44,11 @@ FONT = '"Meiryo", "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif'
 
 # 実行時 cwd に依存しないよう、このファイルからの相対で解決する
 LOGO_PATH = Path(__file__).parent / "02.Logo_Images" / "TR_inc_logo.png"
+# 使い方マニュアルは static/ に置く（manuals/build_manual_html.py で生成）。
+# - 別ウィンドウで開く用: Streamlit 静的配信の URL（データURIは別窓で開けないため）
+# - タブ内の埋め込み用   : 同じ HTML を data URI 化（相対URLだと埋め込みが解決できないため）
+MANUAL_PATH = Path(__file__).parent / "static" / "manual.html"
+MANUAL_URL = "app/static/manual.html"
 
 st.set_page_config(
     page_title="AI異常検知：閾値と評価指標",
@@ -358,6 +364,19 @@ def pct(value: float) -> str:
     return "—" if math.isnan(value) else f"{value * 100:.1f}%"
 
 
+@st.cache_data
+def load_manual_src() -> str:
+    """埋め込み用にマニュアル HTML を data URI 化する（1度だけ読んでキャッシュ）。"""
+    if MANUAL_PATH.exists():
+        html = MANUAL_PATH.read_text(encoding="utf-8")
+    else:
+        html = "<p>マニュアルが見つかりません。</p>"
+    b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
+    return f"data:text/html;charset=utf-8;base64,{b64}"
+
+
+
+
 # --- Step2: ROC / PR / F1 曲線 ---------------------------------------------
 def _curve_layout(fig: go.Figure, title: str) -> None:
     """3つの曲線図で共通のレイアウト。"""
@@ -535,8 +554,23 @@ with st.sidebar.expander("乱数", expanded=False):
     if "seed" not in st.session_state:
         st.session_state.seed = 0
     st.write(f"シード: `{st.session_state.seed}`")
-    if st.button("サンプルを引き直す", width="stretch"):
+    st.caption(
+        "シードは“くじの番号”。同じ番号なら毎回同じサンプルが出る（再現できる）。"
+        "固定してあるので、閾値を動かしても点は動かず境目だけが動く。"
+    )
+    if st.button(
+        "サンプルを引き直す",
+        width="stretch",
+        help=(
+            "分布の設定（数・中心・ばらつき・形）はそのままに、別のサンプルを"
+            "引き直す＝「別の日にもう一度、同じラインから抜き取り検査した」イメージ。"
+            "ラインの実力は同じでも、たまたま選ばれた製品が違うと結果の数字は少しブレる。"
+        ),
+    ):
         st.session_state.seed += 1
+    st.caption(
+        "同じ設定でも、選ぶサンプル次第で成績は少し変わる — を体験するボタンです。"
+    )
 
 ok_scores, ng_scores = make_scores(ok_spec, ng_spec, st.session_state.seed)
 cm = confusion_at(ok_scores, ng_scores, threshold)
@@ -544,14 +578,21 @@ m = metrics_at(cm)
 
 # --- 本体 -------------------------------------------------------------------
 st.title("AI異常検知：閾値と評価指標")
+st.markdown(
+    "> 幸福な家庭はみな同じように似ているが、"
+    "不幸な家庭は不幸なさまもそれぞれ違うものだ。\n"
+    ">\n"
+    "> — トルストイ『アンナ・カレーニナ』"
+)
 st.caption(
-    "AIは最初から OK / NG を答えているのではない。"
-    "各サンプルに「学習した良品とどれくらい違うか」を表す**異常スコア**を付け、"
-    "そのスコアが**閾値**を超えたものを NG と判定している。"
+    "異常検知もこれと同じ。**良品はどれも似ている**が、**欠陥は一つひとつ違う**。"
+    "だから AI は「良品らしさ」だけを学び、そこから外れた度合いを **異常スコア** にする。"
+    "そのスコアが **閾値** を超えたものを NG と判定する — "
+    "AIは最初から OK / NG を答えているわけではない。"
 )
 
-tab_threshold, tab_matrix, tab_curves = st.tabs(
-    ["① 閾値とは何か", "② 混同行列と評価指標", "③ ROC / PR / F1 曲線"]
+tab_threshold, tab_matrix, tab_curves, tab_manual = st.tabs(
+    ["① 閾値とは何か", "② 混同行列と評価指標", "③ ROC / PR / F1 曲線", "📖 使い方"]
 )
 
 with tab_threshold:
@@ -724,3 +765,16 @@ with tab_curves:
         "F1 曲線に重ねた **Recall（青）と Precision（橙）が交差するあたり** ＝"
         "両者のバランスが取れた位置で、**F1 は最大** になる。"
     )
+
+with tab_manual:
+    st.markdown(
+        f'<a href="{MANUAL_URL}" target="_blank" rel="noopener" '
+        'style="display:inline-block;padding:8px 18px;border-radius:8px;'
+        'background:#2a78d6;color:#fff;font-weight:700;text-decoration:none;'
+        'font-family:Meiryo,sans-serif;">🗗 使い方を別ウィンドウで開く</a>'
+        '<span style="color:#898781;font-size:13px;margin-left:12px;">'
+        'デュアルモニタの方は、開いたタブを別画面へ移すと見やすくなります。</span>',
+        unsafe_allow_html=True,
+    )
+    st.write("")
+    st.iframe(load_manual_src(), height=820)

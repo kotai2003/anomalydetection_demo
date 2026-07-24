@@ -1,3 +1,7 @@
+# static/ のファイルを URL 配信する（使い方マニュアルを別ウィンドウで開けるように）。
+[server]
+enableStaticServing = true
+
 # 説明・教材用途のため配色を固定する（会議での投影・スクリーンショットで揺れないように）。
 # Plotly 側の配色も app.py でライト面 (#fcfcfb) 前提の値に固定している。
 [theme]

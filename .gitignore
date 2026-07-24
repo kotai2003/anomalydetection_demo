@@ -6,6 +6,8 @@ skills/
 CLAUDE.md
 # IDE 設定
 .idea/
+# 操作マニュアル（社内・顧客向け資料。公開アプリには含めない）
+manuals/
 
 # === Python ===
 __pycache__/
