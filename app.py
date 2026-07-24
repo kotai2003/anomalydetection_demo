@@ -365,14 +365,25 @@ def pct(value: float) -> str:
 
 
 @st.cache_data
-def load_manual_src() -> str:
-    """埋め込み用にマニュアル HTML を data URI 化する（1度だけ読んでキャッシュ）。"""
+def _manual_src(mtime: float) -> str:
+    """マニュアル HTML を data URI 化する。mtime をキーにしてキャッシュする。"""
     if MANUAL_PATH.exists():
         html = MANUAL_PATH.read_text(encoding="utf-8")
     else:
         html = "<p>マニュアルが見つかりません。</p>"
     b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
     return f"data:text/html;charset=utf-8;base64,{b64}"
+
+
+def load_manual_src() -> str:
+    """埋め込み用マニュアルの data URI。
+
+    引数なしでキャッシュすると、マニュアルを差し替えてもプロセスが生き続けた場合に
+    古い内容が残る（静的配信はディスク直読みなので新しく、埋め込みだけ古くなる）。
+    更新時刻をキーに渡して、ファイルが変われば必ず作り直す。
+    """
+    mtime = MANUAL_PATH.stat().st_mtime if MANUAL_PATH.exists() else 0.0
+    return _manual_src(mtime)
 
 
 
