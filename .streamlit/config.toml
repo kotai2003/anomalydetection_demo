@@ -1,0 +1,9 @@
+# 説明・教材用途のため配色を固定する（会議での投影・スクリーンショットで揺れないように）。
+# Plotly 側の配色も app.py でライト面 (#fcfcfb) 前提の値に固定している。
+[theme]
+base = "light"
+backgroundColor = "#fcfcfb"
+secondaryBackgroundColor = "#f0efec"
+textColor = "#0b0b0b"
+primaryColor = "#2a78d6"
+font = "sans-serif"
