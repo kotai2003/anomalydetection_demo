@@ -14,7 +14,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from ui import sidebar, tab_curves, tab_manual, tab_matrix, tab_threshold
+from ui import sidebar, tab_curves, tab_manual, tab_matrix, tab_sampling, tab_threshold
 
 # 実行時 cwd に依存しないよう、このファイルからの相対で解決する
 LOGO_PATH = Path(__file__).parent / "02.Logo_Images" / "TR_inc_logo.png"
@@ -42,8 +42,14 @@ st.caption(
     "AIは最初から OK / NG を答えているわけではない。"
 )
 
-tab_1, tab_2, tab_3, tab_help = st.tabs(
-    ["① 閾値とは何か", "② 混同行列と評価指標", "③ ROC / PR / F1 曲線", "📖 使い方"]
+tab_1, tab_2, tab_3, tab_4, tab_help = st.tabs(
+    [
+        "① 閾値とは何か",
+        "② 混同行列と評価指標",
+        "③ ROC / PR / F1 曲線",
+        "④ 少数サンプルの問題",
+        "📖 使い方",
+    ]
 )
 
 with tab_1:
@@ -54,6 +60,9 @@ with tab_2:
 
 with tab_3:
     tab_curves.render(data)
+
+with tab_4:
+    tab_sampling.render(data)
 
 with tab_help:
     tab_manual.render()
