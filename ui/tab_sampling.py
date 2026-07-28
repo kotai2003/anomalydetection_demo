@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import astuple
 
 import numpy as np
@@ -54,6 +56,11 @@ from ui.theme import (
 # 反復実験のシード。固定して、同じ設定なら誰が開いても同じ図になるようにする。
 EXPERIMENT_SEED = 0
 
+# 「任意の枚数を追加」の上限。母集団を最大にしたときの抜き取り上限に合わせる。
+# 実際に使える上限は母集団サイズで変わるが、可変にするとウィジェット ID が
+# 変わって入力がリセットされるため、ここは固定にして採否は入力後に判定する。
+ADDABLE_MAX = max_eval_ok(max(POOL_OK_SIZE_OPTIONS))
+
 # 箱ひげ図に出す指標（内部キー: (表示名, 色)）
 BOX_METRICS = {
     "recall": ("Recall（検出率）", OK_COLOR),
@@ -85,17 +92,24 @@ def _run_experiments(
 def _parse_ok_counts(raw_values, limit: int) -> tuple[list[int], list[str]]:
     """multiselect の選択（既定は int、手入力は文字列）を OK 枚数へ揃える。
 
-    戻り値は (採用した枚数, 却下した入力の説明)。手入力を受け付ける以上、
-    数値でないものや母集団に対して大きすぎるものが来る前提で書く。
+    戻り値は (採用した枚数, 却下した入力の説明)。
+
+    手入力の受け取りは**寛容にする**。`accept_new_options` で入った値は、
+    次の再描画で format_func を通り「OK 150 枚」という表示文字列に化けて
+    戻ってくる。`int()` だけで受けると、追加できたはずの枚数が次の操作で
+    消える。数字さえ含んでいれば拾う — 「150」「150枚」「OK 150 枚」は
+    すべて 150 として扱う。
     """
     counts: list[int] = []
     rejected: list[str] = []
     for value in raw_values:
-        try:
-            n = int(str(value).strip())
-        except ValueError:
-            rejected.append(f"「{value}」は数値ではありません")
+        # IME が入ったままだと全角数字になりやすい。桁区切りのカンマも来る。
+        text = unicodedata.normalize("NFKC", str(value)).replace(",", "")
+        digits = re.findall(r"\d+", text)
+        if len(digits) != 1:
+            rejected.append(f"「{value}」から枚数を読み取れません（例: 150）")
             continue
+        n = int(digits[0])
         if n < 2:
             rejected.append(f"{n} 枚は少なすぎます（2 枚以上）")
         elif n > limit:
@@ -361,6 +375,75 @@ def _pool_controls(data: AppData) -> tuple[int, int]:
     return ratio, pool_ok_size
 
 
+def _eval_controls(limit: int) -> tuple[list, int]:
+    """比べる評価サンプル数と反復回数。戻り値は (multiselect の生の選択, 反復回数)。
+
+    枚数の追加口は 2 つ用意する。枠に直接打つ方法（`accept_new_options`）は
+    「OK 150 枚」と表示されている一覧に対して `150` としか打てず気づきにくいので、
+    数値入力＋ボタンという明示的な導線を主にする。
+    """
+    if "extra_ok_counts" not in st.session_state:
+        st.session_state.extra_ok_counts = []
+    if "eval_ok_counts" not in st.session_state:
+        st.session_state.eval_ok_counts = list(PRESET_OK_COUNTS)
+
+    list_col, add_col, repeat_col = st.columns([3, 2, 2])
+
+    # 追加処理は multiselect より前に置くこと。ウィジェット生成後に
+    # session_state["eval_ok_counts"] を書き換えると Streamlit が例外を投げる。
+    with add_col:
+        num_col, button_col = st.columns([3, 2])
+        # max_value に可変値を入れるとウィジェット ID が変わって入力が
+        # リセットされるので、上限は固定にして採否は _parse_ok_counts で判定する。
+        new_count = num_col.number_input(
+            "任意の枚数を追加", min_value=2, max_value=ADDABLE_MAX,
+            value=150, step=10, key="new_ok_count",
+        )
+        button_col.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if button_col.button("＋ 追加", width="stretch"):
+            n = int(new_count)
+            if n > limit:
+                st.warning(f"{n} 枚は多すぎます（母集団の半分 {limit:,} 枚まで）")
+            else:
+                if n not in PRESET_OK_COUNTS:
+                    st.session_state.extra_ok_counts = sorted(
+                        set(st.session_state.extra_ok_counts) | {n}
+                    )
+                if n not in st.session_state.eval_ok_counts:
+                    st.session_state.eval_ok_counts = [
+                        *st.session_state.eval_ok_counts, n
+                    ]
+
+    with repeat_col:
+        n_repeat = st.slider(
+            "抜き取りを繰り返す回数", 20, 500, 100, 20,
+            key="eval_repeat",
+            help="1 回 = 1 度の抜き取り検査。何度も繰り返して結果の散らばりを見る。",
+        )
+
+    with list_col:
+        # help に母集団サイズなど変わる値を入れないこと。ウィジェット ID が
+        # 変わって選択がリセットされる（上限は下の caption 側で伝える）。
+        options = sorted(set(PRESET_OK_COUNTS) | set(st.session_state.extra_ok_counts))
+        raw_counts = st.multiselect(
+            "比べる評価サンプル数（OK 枚数）",
+            options=options,
+            format_func=lambda n: f"OK {n} 枚",
+            accept_new_options=True,
+            key="eval_ok_counts",
+            help="不要な条件は各チップの × で外せる。NG 枚数は上の OK:NG 比から決まる。",
+        )
+
+    st.caption(
+        f"**一覧に無い枚数を試すには** … 右の「任意の枚数を追加」に数字を入れて "
+        "**＋ 追加**（例: 150 → OK150 枚の条件が加わる）。"
+        "枠内に直接 `150` と打って Enter でも入る（**数字だけ**。"
+        "「OK150枚」のように打っても数字を拾う）。"
+        f"1 条件あたり OK 2 〜 {limit:,} 枚まで（母集団の半分が上限）。"
+    )
+    return raw_counts, n_repeat
+
+
 def _comparison_table(data: AppData, ratio: int, pool_ok_size: int) -> None:
     """タブ①〜③と何が違うのかを正面から並べる。"""
     sample_total = data.ok_spec.n + data.ng_spec.n
@@ -451,33 +534,19 @@ def render(data: AppData) -> None:
     st.markdown("### 3. その母集団から、何度も抜き取ってみる")
 
     limit = max_eval_ok(pool_ok_size)
-    left, right = st.columns([3, 2])
-    with left:
-        # help に母集団サイズなど変わる値を入れないこと。ウィジェット ID が
-        # 変わって選択がリセットされる（上限は下の caption 側で伝える）。
-        raw_counts = st.multiselect(
-            "比べる評価サンプル数（OK 枚数）",
-            options=list(PRESET_OK_COUNTS),
-            default=list(PRESET_OK_COUNTS),
-            format_func=lambda n: f"OK {n} 枚",
-            accept_new_options=True,
-            key="eval_ok_counts",
-            help=(
-                "一覧に無い枚数は、そのまま数字を入力すれば追加できる（例: 15）。"
-                "NG 枚数は上の OK:NG 比から決まる。"
-            ),
-        )
-        st.caption(f"1 条件あたり OK 2 〜 {limit:,} 枚まで（母集団の半分が上限）。")
-    with right:
-        n_repeat = st.slider(
-            "抜き取りを繰り返す回数", 20, 500, 100, 20,
-            key="eval_repeat",
-            help="1 回 = 1 度の抜き取り検査。何度も繰り返して結果の散らばりを見る。",
-        )
+    raw_counts, n_repeat = _eval_controls(limit)
 
     ok_counts, rejected = _parse_ok_counts(raw_counts, limit)
     for message in rejected:
         st.warning(message)
+
+    # 直接入力で入った枚数を正式な選択肢へ昇格させる。こうしておくと次の
+    # 再描画で「OK 150 枚」→ 150 と読み戻せる（表示文字列のまま残らない）。
+    unknown = set(ok_counts) - set(PRESET_OK_COUNTS) - set(st.session_state.extra_ok_counts)
+    if unknown:
+        st.session_state.extra_ok_counts = sorted(
+            set(st.session_state.extra_ok_counts) | unknown
+        )
 
     conditions = conditions_for(ok_counts, ratio)
     if len(conditions) < 2:
