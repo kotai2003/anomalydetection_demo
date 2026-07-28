@@ -31,7 +31,10 @@ from core.sampling import (
     DEFAULT_POOL_OK_SIZE,
     POOL_OK_SIZE_OPTIONS,
     PRESET_OK_COUNTS,
+    condition_label,
     conditions_for,
+    draw_trial,
+    f1_max_threshold,
     make_pool,
     max_eval_ok,
     pool_ng_size,
@@ -40,6 +43,7 @@ from core.sampling import (
     summarize,
 )
 from ui.sidebar import AppData
+from ui.tab_threshold import score_figure
 
 # 「正解の閾値がどう決まったか」は、タブ②③で使ったのと同じ図を母集団に
 # 当てて見せる。同じ道具の使い回しであること自体が説明になるので、
@@ -54,6 +58,7 @@ from ui.theme import (
     INK_MUTED,
     INK_SECONDARY,
     LARGE_N_COLOR,
+    MARKER_RED,
     NG_COLOR,
     OK_COLOR,
     SMALL_N_COLOR,
@@ -101,6 +106,11 @@ def _run_experiments(
 def _pool_sweep(ok_pool: np.ndarray, ng_pool: np.ndarray):
     """母集団に対する閾値スイープと AUC。タブ③と同じ core.curves を使う。"""
     return sweep(ok_pool, ng_pool), roc_auc(ok_pool, ng_pool)
+
+
+def _sample_sweep(ok: np.ndarray, ng: np.ndarray):
+    """抜き取り 1 回分のスイープ。数十枚なので即座に終わる（キャッシュ不要）。"""
+    return sweep(ok, ng), roc_auc(ok, ng)
 
 
 def _derivation(ok_pool: np.ndarray, ng_pool: np.ndarray, threshold: float) -> None:
@@ -158,6 +168,124 @@ def _derivation(ok_pool: np.ndarray, ng_pool: np.ndarray, threshold: float) -> N
         "どこを選ぶかは品質方針の問題で、数学が決めるわけではない — "
         "これはタブ③で見たとおり。ここでは**少数サンプルでも同じ狙いを"
         "定められるか**を問題にしているので、狙いを F1 最大に固定している。"
+    )
+
+
+def _single_draw(
+    ok_pool: np.ndarray,
+    ng_pool: np.ndarray,
+    conditions: tuple,
+    n_repeat: int,
+    ref_threshold: float,
+) -> None:
+    """箱ひげ図の点 1 つ（＝1 回の抜き取り）を開いて、閾値が決まる過程を見せる。
+
+    母集団に対してやったのと同じ ヒストグラム → ROC → 混同行列 → F1 を、
+    今度は**その少数サンプルだけ**に対して行う。条件と試行を切り替えると、
+    同じラインを見ているのに毎回違う答えが出ることが目で追える。
+    """
+    if "demo_trial" not in st.session_state:
+        st.session_state.demo_trial = 0
+
+    labels = [condition_label(n_ok, n_ng) for n_ok, n_ng in conditions]
+    # OK:NG 比・母集団サイズ・選んだ枚数が変わると条件名も総入れ替えになる。
+    # Streamlit 1.60 は選択済みの名前が消えると黙って先頭へ戻す（落ちはしない）が、
+    # 版に依存させたくないので、生成前に自分で整合させておく。
+    if st.session_state.get("demo_condition") not in labels:
+        st.session_state.demo_condition = labels[0]
+
+    pick_col, button_col = st.columns([2, 1])
+    with pick_col:
+        chosen = st.selectbox("どの条件の抜き取りを見るか", labels, key="demo_condition")
+    with button_col:
+        st.write("")
+        if st.button(
+            "別の抜き取りを見る", width="stretch",
+            help="同じ条件で、もう一度ラインから抜き取り直したときに何が出るか。",
+        ):
+            st.session_state.demo_trial += 1
+
+    n_ok, n_ng = conditions[labels.index(chosen)]
+    trial = st.session_state.demo_trial % n_repeat
+    ok, ng = draw_trial(ok_pool, ng_pool, n_ok, n_ng, trial, seed=EXPERIMENT_SEED)
+
+    t_star = f1_max_threshold(ok, ng)
+    sw, auc = _sample_sweep(ok, ng)
+    cm = confusion_at(ok, ng, t_star)
+    m = metrics_at(cm)
+    fpr = cm.fp / (cm.fp + cm.tn) if (cm.fp + cm.tn) else np.nan
+    f1_max = float(np.nanmax(sw.f1)) if not np.all(np.isnan(sw.f1)) else np.nan
+    gap = t_star - ref_threshold
+
+    st.caption(
+        f"**{chosen} の {trial + 1} 回目の抜き取り**（箱ひげ図の点 1 つにあたる）。"
+        "母集団に対してやったのと同じ 4 つの図を、この数枚だけに対して行う。"
+    )
+
+    hist_col, note_col = st.columns([2, 1])
+    with hist_col:
+        st.markdown("**ステップ1: 抜き取ったサンプルを見る（分布と個票）**")
+        st.plotly_chart(score_figure(ok, ng, t_star, trial))
+    with note_col:
+        st.write("")
+        st.metric("この抜き取りで決まった閾値", f"{t_star:.3f}",
+                  delta=f"{gap:+.3f}（母集団の正解 {ref_threshold:.3f} との差）",
+                  delta_color="off")
+        st.metric("この抜き取りで報告される Recall", pct(m["recall"]))
+        st.metric("同じく Specificity", pct(m["specificity"]))
+        st.caption(
+            f"現場で見えるのはこの {n_ok + n_ng} 枚だけ。"
+            "**この数枚から母集団の答えを当てにいっている**。"
+        )
+
+    roc_col, cm_col = st.columns(2)
+    with roc_col:
+        st.markdown("**ステップ2: この数枚だけで ROC を引く**")
+        st.plotly_chart(roc_figure(sw, auc, fpr, m["recall"]))
+        st.caption(
+            f"AUC = {auc:.3f}。母集団で測った実力とは違う値になる。"
+            "点が少ないほど曲線は階段状に粗くなる。"
+        )
+    with cm_col:
+        st.markdown("**ステップ3: その閾値で切った内訳**")
+        st.plotly_chart(
+            confusion_figure(cm, t_star, height=380,
+                             title=f"この {n_ok + n_ng} 枚を閾値 {t_star:.3f} で切った結果")
+        )
+        st.caption(
+            f"過検知 {cm.fp} 件・見逃し {cm.fn} 件。"
+            f"NG は {n_ng} 枚しかないので、**1 枚の判定が Recall を "
+            f"{1 / n_ng:.0%} 動かす**。"
+        )
+
+    f1_col, f1_note = st.columns([2, 1])
+    with f1_col:
+        st.markdown("**ステップ4: F1 が最大の閾値を採る**")
+        fig = f1_figure(sw, t_star, t_star, f1_max, True, True)
+        # 母集団の正解を重ねて、どれだけ外したかをその場で見せる
+        fig.add_vline(
+            x=ref_threshold, line=dict(color=MARKER_RED, width=2, dash="dot"),
+            annotation_text=f"母集団の正解 {ref_threshold:.3f}",
+            annotation_position="bottom right",
+            annotation_font=dict(color=MARKER_RED, size=12, family=FONT),
+        )
+        st.plotly_chart(fig)
+    with f1_note:
+        st.write("")
+        st.markdown(
+            f"黒い破線が**この抜き取りが選んだ閾値 {t_star:.3f}**、"
+            f"赤い点線が**母集団の正解 {ref_threshold:.3f}**。\n\n"
+            f"この回は **{gap:+.3f}** ずれた。\n\n"
+            "枚数が少ないほど F1 曲線は段差が粗くなり、頂点が平らになる。"
+            "**どこを頂点と呼ぶかが数枚の入れ替わりで変わる** — "
+            "これが閾値のばらつきの正体。"
+        )
+
+    st.info(
+        "**「別の抜き取りを見る」を何度か押してみる。** 同じ条件・同じライン・"
+        "同じ検出器なのに、選ばれる閾値も報告される Recall も毎回変わる。"
+        "条件を OK300・NG60 に変えて同じことをすると、変わり方が小さくなる。"
+        "上の箱ひげ図は、これを 100 回ぶん重ねたものにあたる。"
     )
 
 
@@ -568,7 +696,27 @@ def render(data: AppData) -> None:
         "という現場の手順を何度も繰り返す。"
     )
 
-    st.markdown("### 1. まず、母集団（ラインの真の実力）を見る")
+    st.markdown("### 1. 「少数サンプルの問題」とは何か")
+    st.markdown(
+        "AI の実力そのものは変わっていないのに、**何枚で測ったか**によって、"
+        "決まる閾値も報告される成績も変わってしまう — という **測り方の問題**。"
+        "次の 3 つの形で現れる。\n\n"
+        "1. **閾値がぶれる。** 少数のデータから F1 が最大の点を探すと、"
+        "たまたま選ばれた数枚で最適点が動く。その閾値をそのまま量産へ持ち込むと、"
+        "実力とずれた線引きのまま走ることになる。\n"
+        "2. **評価値がぶれる。** 1 枚の判定が変わるだけで数字が大きく動く。"
+        "欠陥 2 枚なら、1 枚見逃すだけで Recall は 100% から 50% になる。"
+        "良品 10 枚なら、1 枚の過検知で良品正解率が 10 ポイント動く。\n"
+        "3. **良く見えるほうへ偏る。** 閾値を決めたデータでそのまま成績を報告すると、"
+        "そのサンプルに合わせ込んだ楽観的な数字になる。"
+        "少数ほど「見逃しゼロ」が出やすい。\n\n"
+        "**確かめ方**: 現場では答え（母集団の真の実力）が分からないので、"
+        "ずれているかどうかも分からない。"
+        "そこでこのタブでは**先に答えを作っておき**、"
+        "そこから数十枚だけ抜き取って、答えをどれだけ外すかを実測する。"
+    )
+
+    st.markdown("### 2. まず、母集団（ラインの真の実力）を見る")
     ratio, pool_ok_size = _pool_controls(data)
 
     ok_pool, ng_pool, ref = _build_pool(
@@ -615,12 +763,12 @@ def render(data: AppData) -> None:
         _derivation(ok_pool, ng_pool, ref["threshold"])
 
     st.divider()
-    st.markdown("### 2. タブ①〜③とどこが違うのか")
+    st.markdown("### 3. タブ①〜③とどこが違うのか")
     _comparison_table(data, ratio, pool_ok_size)
     _difference_note(data)
 
     st.divider()
-    st.markdown("### 3. その母集団から、何度も抜き取ってみる")
+    st.markdown("### 4. その母集団から、何度も抜き取ってみる")
 
     limit = max_eval_ok(pool_ok_size)
     raw_counts, n_repeat = _eval_controls(limit)
@@ -672,6 +820,12 @@ def render(data: AppData) -> None:
         "**黒い破線が正解**。左の条件ほど箱が縦に長い＝"
         "同じラインを測っているのに、たまたま選んだサンプルで答えが変わっている。"
     )
+
+    with st.expander(
+        "▸ この点 1 つ（＝1 回の抜き取り）の中で何が起きているか"
+        "（分布 → ROC → 混同行列 → F1）"
+    ):
+        _single_draw(ok_pool, ng_pool, conditions, n_repeat, ref["threshold"])
 
     st.plotly_chart(
         overlay_figure(experiments, summary["condition"].iloc[0],

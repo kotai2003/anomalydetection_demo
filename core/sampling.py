@@ -171,6 +171,30 @@ def repeat_experiment(
     return pd.DataFrame(rows)
 
 
+def draw_trial(
+    ok_pool: np.ndarray,
+    ng_pool: np.ndarray,
+    n_ok: int,
+    n_ng: int,
+    trial: int,
+    *,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """repeat_experiment の trial 回目と**まったく同じ**抜き取りを再現する。
+
+    箱ひげ図の 1 点を取り出して中身を見せるための関数。乱数列を頭から
+    trial 回ぶん進めて同じ位置に合わせるので、ここで得たサンプルから
+    計算し直した閾値は、その試行の行の値と一致する。
+    """
+    rng = np.random.default_rng([seed, n_ok, n_ng])
+    for _ in range(trial):
+        rng.choice(ok_pool, size=n_ok, replace=False)
+        rng.choice(ng_pool, size=n_ng, replace=False)
+    ok = rng.choice(ok_pool, size=n_ok, replace=False)
+    ng = rng.choice(ng_pool, size=n_ng, replace=False)
+    return ok, ng
+
+
 def run_conditions(
     ok_pool: np.ndarray,
     ng_pool: np.ndarray,
