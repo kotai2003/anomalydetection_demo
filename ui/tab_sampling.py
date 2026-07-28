@@ -17,12 +17,13 @@ import streamlit as st
 from core.distributions import DistributionSpec
 from core.intervals import rule_of_three, wilson
 from core.sampling import (
-    EVAL_OK_NG_RATIO,
-    POOL_NG_SIZE,
+    DEFAULT_OK_NG_RATIO,
+    MAX_EVAL_OK,
     POOL_OK_SIZE,
-    PRESET_CONDITIONS,
-    condition_label,
+    PRESET_OK_COUNTS,
+    conditions_for,
     make_pool,
+    pool_ng_size,
     pool_reference,
     run_conditions,
     summarize,
@@ -59,17 +60,40 @@ BOX_METRICS = {
 
 @st.cache_data(show_spinner="抜き取りを反復中…")
 def _run_experiments(
-    ok_params: tuple, ng_params: tuple, conditions: tuple, n_repeat: int
+    ok_params: tuple, ng_params: tuple, conditions: tuple, n_repeat: int, ratio: int
 ) -> tuple[pd.DataFrame, dict]:
     """母集団を作り、条件ごとに反復抽出する。設定が同じならキャッシュを返す。"""
     rng = np.random.default_rng(POOL_SEED)
     ok_pool = make_pool(DistributionSpec(*ok_params), POOL_OK_SIZE, rng)
-    ng_pool = make_pool(DistributionSpec(*ng_params), POOL_NG_SIZE, rng)
+    ng_pool = make_pool(DistributionSpec(*ng_params), pool_ng_size(ratio), rng)
 
     experiments = run_conditions(
         ok_pool, ng_pool, conditions, n_repeat, seed=EXPERIMENT_SEED
     )
     return experiments, pool_reference(ok_pool, ng_pool)
+
+
+def _parse_ok_counts(raw_values) -> tuple[list[int], list[str]]:
+    """multiselect の選択（既定は int、手入力は文字列）を OK 枚数へ揃える。
+
+    戻り値は (採用した枚数, 却下した入力の説明)。手入力を受け付ける以上、
+    数値でないものや母集団に対して大きすぎるものが来る前提で書く。
+    """
+    counts: list[int] = []
+    rejected: list[str] = []
+    for value in raw_values:
+        try:
+            n = int(str(value).strip())
+        except ValueError:
+            rejected.append(f"「{value}」は数値ではありません")
+            continue
+        if n < 2:
+            rejected.append(f"{n} 枚は少なすぎます（2 枚以上）")
+        elif n > MAX_EVAL_OK:
+            rejected.append(f"{n} 枚は多すぎます（母集団の半分 {MAX_EVAL_OK} 枚まで）")
+        else:
+            counts.append(n)
+    return sorted(set(counts)), rejected
 
 
 def _box_layout(fig: go.Figure, title: str, y_title: str) -> None:
@@ -229,22 +253,33 @@ def render(data: AppData) -> None:
     st.caption(
         "ここまでは「1 回測った結果」を見てきた。このタブで見るのは "
         "**その測り方で本当に測れているのか**。"
-        f"サイドバーの分布を**ラインの真の実力**（良品 {POOL_OK_SIZE:,} 個・"
-        f"欠陥 {POOL_NG_SIZE:,} 個の母集団）とみなし、そこから決まった枚数だけ"
-        "抜き取って、**そのサンプルだけで F1 最大の閾値を決めて評価する** — "
+        f"サイドバーの分布を**ラインの真の実力**（良品 {POOL_OK_SIZE:,} 個規模の母集団）"
+        "とみなし、そこから決まった枚数だけ抜き取って、"
+        "**そのサンプルだけで F1 最大の閾値を決めて評価する** — "
         "という現場の手順を何度も繰り返す。"
     )
 
-    left, right = st.columns([3, 2])
+    left, mid, right = st.columns([3, 2, 2])
     with left:
-        chosen = st.multiselect(
-            "比べる評価サンプル数",
-            options=[condition_label(n_ok, n_ng) for n_ok, n_ng in PRESET_CONDITIONS],
-            default=[condition_label(n_ok, n_ng) for n_ok, n_ng in PRESET_CONDITIONS],
+        raw_counts = st.multiselect(
+            "比べる評価サンプル数（OK 枚数）",
+            options=list(PRESET_OK_COUNTS),
+            default=list(PRESET_OK_COUNTS),
+            format_func=lambda n: f"OK {n} 枚",
+            accept_new_options=True,
             help=(
-                f"評価用の OK:NG は {EVAL_OK_NG_RATIO}:1 に固定している。"
-                "比率まで変えると、閾値の違いがサンプル数のせいなのか"
-                "不良割合のせいなのか区別できなくなるため。"
+                "一覧に無い枚数は、そのまま数字を入力すれば追加できる（例: 15）。"
+                f"2 〜 {MAX_EVAL_OK} 枚まで。NG 枚数は右の OK:NG 比から決まる。"
+            ),
+        )
+    with mid:
+        ratio = st.slider(
+            "評価データの OK:NG 比", 1, 20, DEFAULT_OK_NG_RATIO, 1,
+            format="%d : 1",
+            help=(
+                "評価に使う良品と欠陥の比。全条件で共通にする — 条件ごとに比まで"
+                "変えると、閾値の違いがサンプル数のせいか欠陥割合のせいか"
+                "区別できなくなるため。"
             ),
         )
     with right:
@@ -253,17 +288,23 @@ def render(data: AppData) -> None:
             help="1 回 = 1 度の抜き取り検査。何度も繰り返して結果の散らばりを見る。",
         )
 
-    conditions = tuple(
-        (n_ok, n_ng)
-        for n_ok, n_ng in PRESET_CONDITIONS
-        if condition_label(n_ok, n_ng) in chosen
-    )
+    ok_counts, rejected = _parse_ok_counts(raw_counts)
+    for message in rejected:
+        st.warning(message)
+
+    conditions = conditions_for(ok_counts, ratio)
     if len(conditions) < 2:
         st.info("比べる評価サンプル数を 2 つ以上選んでください。")
         return
 
+    st.caption(
+        "この設定で比べる条件: "
+        + " / ".join(f"**OK{n_ok}・NG{n_ng}**" for n_ok, n_ng in conditions)
+        + f"（欠陥割合 {1 / (1 + ratio):.1%}）"
+    )
+
     experiments, ref = _run_experiments(
-        astuple(data.ok_spec), astuple(data.ng_spec), conditions, n_repeat
+        astuple(data.ok_spec), astuple(data.ng_spec), conditions, n_repeat, ratio
     )
     if experiments.empty:
         st.warning("この分布では閾値を決められる試行がありませんでした。")
@@ -282,6 +323,29 @@ def render(data: AppData) -> None:
         "この 4 つが「答え」。以下の各試行は、少数のサンプルだけから"
         "この値を推し量ろうとしている。**答えからどれだけずれるか**が問題になる。"
     )
+
+    tab3_prevalence = data.ng_spec.n / (data.ok_spec.n + data.ng_spec.n)
+    tab3_ratio = data.ok_spec.n / data.ng_spec.n
+    with st.expander("なぜタブ③の「採用中の閾値」と一致しないのか"):
+        st.markdown(
+            f"見ているデータと**欠陥割合が違う**ためで、どちらかが誤りではない。\n\n"
+            f"- **タブ③** … サイドバーで生成した良品 {data.ok_spec.n} 枚・"
+            f"欠陥 {data.ng_spec.n} 枚（欠陥割合 **{tab3_prevalence:.1%}**、"
+            f"OK:NG ≈ {tab3_ratio:.1f}:1）の上で F1 最大にした値。"
+            "「引き直す」を押すと動く。\n"
+            f"- **このタブ** … 母集団 {POOL_OK_SIZE:,} + {pool_ng_size(ratio):,} 枚"
+            f"（欠陥割合 **{1 / (1 + ratio):.1%}**、OK:NG = {ratio}:1）の上で"
+            "F1 最大にした値。抜き取りと同じ欠陥割合で持っているので、"
+            "各試行が当てにいく「正解」になる。母集団は引き直しても動かない。\n\n"
+            "**F1 最大の閾値は、評価データの欠陥割合で動く。** F1 は Precision を"
+            "含むため、欠陥割合が下がると同じ閾値でも Precision が下がり、"
+            "最適点は高い閾値側へずれる。上の「OK:NG 比」を "
+            f"**{tab3_ratio:.0f}:1** に近づけると、タブ③の値へ寄っていく。\n\n"
+            "これは表示上の都合ではなく、量産評価で効く事実である。"
+            "評価用に NG を集めたデータセットの欠陥割合（数十%）と、"
+            "実ラインの不良率（多くは数%以下）は桁が違う。"
+            "**評価セットで F1 最大にした閾値は、実ラインでの最適閾値ではない。**"
+        )
 
     st.divider()
 

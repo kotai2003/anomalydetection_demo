@@ -23,23 +23,39 @@ import pandas as pd
 from .curves import GRID
 from .distributions import DistributionSpec, generate_scores
 
-# 評価データの OK:NG 比。**条件によってこの比を変えてはいけない。**
-# F1 が最大になる閾値は不良割合で動くため、比率まで一緒に動かすと、
+# 評価データの OK:NG 比（OK が NG の何倍か）。**1回の実験の中では全条件で共通。**
+# F1 が最大になる閾値は欠陥割合で動くため、条件ごとに比率まで変えると、
 # 閾値の違いが「サンプル数のせい」なのか「OK:NG 比のせい」なのか
-# 区別できなくなる（見たいのは前者だけ）。
-EVAL_OK_NG_RATIO = 5
+# 区別できなくなる（見たいのは前者だけ）。比そのものを変えて比較したいときは、
+# 実験全体の設定として動かす。
+DEFAULT_OK_NG_RATIO = 5
 
-# 母集団プールの既定サイズ。「真の実力」を十分な精度で表せて、かつ
-# 反復実験が対話的な速さで終わる大きさ。抜き取りと同じ OK:NG 比で持つ
-# ことで、母集団の F1最大閾値がそのまま各試行の「正解」になる。
+# 母集団プールの OK 側サイズ。「真の実力」を十分な精度で表せて、かつ
+# 反復実験が対話的な速さで終わる大きさ。NG 側は上の比から決まり、
+# 抜き取りと同じ欠陥割合になる — これで母集団の F1最大閾値が、
+# そのまま各試行の「正解」になる。
 POOL_OK_SIZE = 2000
-POOL_NG_SIZE = POOL_OK_SIZE // EVAL_OK_NG_RATIO
 
-# 反復実験で使う評価サンプル数。OK 側は構想書の 10/20/50/100/最大に合わせ、
-# NG 側は上の比率から決まる。先頭は初期評価で実際に採られがちな OK10・NG2。
-PRESET_CONDITIONS: tuple[tuple[int, int], ...] = tuple(
-    (n_ok, n_ok // EVAL_OK_NG_RATIO) for n_ok in (10, 20, 50, 100, 300)
-)
+# 1条件で抜き取れる OK の上限。母集団の半分を超えると抜き取りのばらつきが
+# ほとんど無くなり、「少数サンプルの問題」を見る図として意味を失う。
+MAX_EVAL_OK = POOL_OK_SIZE // 2
+
+# 反復実験で使う OK 枚数の既定値（構想書の 10/20/50/100/最大に対応）。
+# NG 枚数は比から決まる。既定比 5:1 での先頭は、初期評価で実際に
+# 採られがちな OK10・NG2。
+PRESET_OK_COUNTS: tuple[int, ...] = (10, 20, 50, 100, 300)
+
+
+def pool_ng_size(ratio: int) -> int:
+    """母集団の NG 側サイズ。抜き取りと同じ欠陥割合になるよう比から決める。"""
+    return max(1, round(POOL_OK_SIZE / ratio))
+
+
+def conditions_for(ok_counts, ratio: int) -> tuple[tuple[int, int], ...]:
+    """OK 枚数の並びと比から、(OK枚数, NG枚数) の条件列を作る（少ない順）。"""
+    return tuple(
+        (n_ok, max(1, round(n_ok / ratio))) for n_ok in sorted(set(ok_counts))
+    )
 
 
 def condition_label(n_ok: int, n_ng: int) -> str:
