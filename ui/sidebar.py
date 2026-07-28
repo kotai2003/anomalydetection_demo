@@ -39,7 +39,8 @@ def make_scores(
 
 def distribution_controls(defaults: dict, key: str) -> DistributionSpec:
     """サイドバーに片側分の分布パラメータ入力を並べる。"""
-    n = st.slider("サンプル数", 2, 300, defaults["n"], key=f"{key}_n")
+    n = st.slider("サンプル数", 2, 300, defaults["n"], key=f"{key}_n",
+                  help="タブ①〜③で表示する抜き取り 1 回分の枚数。タブ④には効かない。")
     center = st.slider("中心位置", 0.0, 1.0, defaults["center"], 0.01, key=f"{key}_c")
     spread = st.slider("ばらつき", 0.01, 0.30, defaults["spread"], 0.01, key=f"{key}_s")
     shape = st.selectbox(
@@ -68,6 +69,21 @@ def render() -> AppData:
 
     threshold = st.sidebar.slider(
         "閾値", 0.0, 1.0, 0.44, 0.01, help="異常スコアがこの値以上なら NG と判定する"
+    )
+    # サイドバーには「全タブに効くもの」と「タブ①〜③にしか効かないもの」が
+    # 混在している。タブ④を見ている人には効かない操作が並んで見えるので、
+    # どこに効くのかをその場に書いておく。
+    st.sidebar.caption(
+        "※ **タブ①〜③でのみ有効。** タブ④は閾値を毎回データから決めるため、"
+        "ここを動かしても変わらない。"
+    )
+
+    st.sidebar.markdown("**ラインの実力（全タブ共通）**")
+    st.sidebar.caption(
+        "**中心位置・ばらつき・分布形状・外れ値**は全タブに効く"
+        "（＝このラインが作る良品と欠陥そのものの設定）。"
+        "ただし**サンプル数だけはタブ①〜③専用** — "
+        "タブ④の母集団の大きさはタブ④側で指定する。"
     )
 
     # デフォルトは「サンプル100枚超・AUC≈0.97 の分離良好な検出器」。
@@ -103,6 +119,10 @@ def render() -> AppData:
             st.session_state.seed += 1
         st.caption(
             "同じ設定でも、選ぶサンプル次第で成績は少し変わる — を体験するボタンです。"
+        )
+        st.caption(
+            "※ **タブ①〜③でのみ有効。** タブ④の母集団は"
+            "「母集団を引き直す」（タブ④内）で引き直す。"
         )
 
     seed = st.session_state.seed
