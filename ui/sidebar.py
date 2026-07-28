@@ -32,9 +32,18 @@ def make_scores(
 
     シードを固定しておかないと閾値スライダーを動かすたびに分布が引き直され、
     「閾値だけを変えた」比較にならない。
+
+    OK と NG は**独立した乱数系列**から引く。1 つの Generator を順に使い回すと、
+    OK 側の**サンプル数・分布形状・外れ値数**を変えただけで乱数の消費量が変わり、
+    その先にある NG 側のサンプルまで引き直されてしまう（中心位置・ばらつきは
+    消費量が変わらないので影響しない）。それでは「OK だけ変えた比較」にならず、
+    数字の変化が設定のせいかサンプルの引き直しのせいか区別できなくなる。
     """
-    rng = np.random.default_rng(seed)
-    return generate_scores(ok, rng), generate_scores(ng, rng)
+    ok_seed, ng_seed = np.random.SeedSequence(seed).spawn(2)
+    return (
+        generate_scores(ok, np.random.default_rng(ok_seed)),
+        generate_scores(ng, np.random.default_rng(ng_seed)),
+    )
 
 
 def distribution_controls(defaults: dict, key: str) -> DistributionSpec:

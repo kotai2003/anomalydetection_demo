@@ -91,11 +91,19 @@ BOX_METRICS = {
 def _build_pool(
     ok_params: tuple, ng_params: tuple, ratio: int, pool_ok_size: int, pool_seed: int
 ) -> tuple[np.ndarray, np.ndarray, dict]:
-    """母集団を作り、その F1最大閾値と指標（＝「正解」）も一緒に返す。"""
-    rng = np.random.default_rng(pool_seed)
-    ok_pool = make_pool(DistributionSpec(*ok_params), pool_ok_size, rng)
+    """母集団を作り、その F1最大閾値と指標（＝「正解」）も一緒に返す。
+
+    OK 側と NG 側は独立した乱数系列から作る（理由は sidebar.make_scores と同じ。
+    共有すると OK の分布形状を変えただけで NG 母集団まで別物になる）。
+    """
+    ok_seed, ng_seed = np.random.SeedSequence(pool_seed).spawn(2)
+    ok_pool = make_pool(
+        DistributionSpec(*ok_params), pool_ok_size, np.random.default_rng(ok_seed)
+    )
     ng_pool = make_pool(
-        DistributionSpec(*ng_params), pool_ng_size(ratio, pool_ok_size), rng
+        DistributionSpec(*ng_params),
+        pool_ng_size(ratio, pool_ok_size),
+        np.random.default_rng(ng_seed),
     )
     return ok_pool, ng_pool, pool_reference(ok_pool, ng_pool)
 
@@ -137,7 +145,10 @@ def _derivation(ok_pool: np.ndarray, ng_pool: np.ndarray, threshold: float) -> N
         st.plotly_chart(roc_figure(sw, auc, fpr, m["recall"]))
         st.caption(
             f"AUC = {auc:.3f}。閾値をどこに置くかとは無関係な、"
-            "**検出器そのものの実力**。赤い点が下で選ばれる正解の閾値の位置。"
+            "**この母集団におけるスコアの順位付け性能**。"
+            "「AI そのものの実力」という固定値ではなく、欠陥の難易度・良品の"
+            "ばらつき・撮像条件が変われば同じ AI でも動く。"
+            "赤い点が下で選ばれる正解の閾値の位置。"
         )
     with cm_col:
         st.markdown("**ステップ2: ある閾値で切った内訳を見る（混同行列）**")
@@ -164,11 +175,16 @@ def _derivation(ok_pool: np.ndarray, ng_pool: np.ndarray, threshold: float) -> N
             "F1 を計算**したものがこの曲線。\n\n"
             f"F1 が最大（{f1_max:.3f}）になったのが **閾値 {threshold:.3f}** で、"
             "これを「正解」と呼んでいる。\n\n"
-            "Recall（青）は閾値を下げるほど上がり、Precision（橙）は上げるほど"
-            "上がる。**両方が釣り合うあたり**が頂点になる。"
+            "Recall（青）は閾値を下げるほど必ず上がる。Precision（橙）は上げると"
+            "上がりやすいが、抜けるのが過検知か真の欠陥かで上下するので"
+            "**単調とは限らない**。この例では**両方が釣り合うあたり**が頂点に"
+            "なっているが、交点が必ず F1 最大点になるわけではない。"
         )
     st.info(
-        "**「正解」と呼んでいるのは、あくまで F1 を最大にする閾値である。** "
+        "**「正解」と呼んでいるのは、あくまで"
+        "「この疑似母集団で F1 を最大にする閾値」である。** "
+        "F1 は見逃し 1 件と過検知 1 件の損失差も、欠陥種別ごとの重大度も"
+        "見ていないので、現場での唯一の最適値ではない。"
         "見逃しを何としても避けたいなら、もっと左（低い閾値）を選ぶことになる。"
         "どこを選ぶかは品質方針の問題で、数学が決めるわけではない — "
         "これはタブ③で見たとおり。ここでは**少数サンプルでも同じ狙いを"
@@ -350,7 +366,8 @@ def requirement_figure(target: float, need_ng: int) -> go.Figure:
         tickfont=dict(color=INK_MUTED),
     )
     fig.update_yaxes(
-        title_text="必要な欠陥の枚数", gridcolor=GRID, zeroline=False,
+        title_text="必要な欠陥の枚数（両側95% Wilson 上限で逆算）",
+        gridcolor=GRID, zeroline=False,
         linecolor="#c3c2b7", tickfont=dict(color=INK_MUTED), rangemode="tozero",
     )
     return fig
@@ -364,9 +381,10 @@ def _sample_plan(conditions: tuple, ref: dict) -> None:
     """
     st.caption(
         "ここまでは「その数字がどれくらいアテになるか」の話だった。"
-        "最後に、**では何枚用意すればよいのか**に答える。必要枚数は"
-        "**母集団の大きさでは決まらない**（2,000 個でも 10 万個でもほぼ同じ）。"
-        "決めるのは「**どこまで言い切りたいか**」だけ。"
+        "最後に、**では何枚用意すればよいのか**に答える。"
+        "評価枚数が母集団に対して十分小さいかぎり、必要枚数は"
+        "**母集団の大きさではほとんど決まらない**（2,000 個でも 10 万個でもほぼ同じ）。"
+        "決めるのは「**どこまで言い切りたいか**」。"
     )
 
     left, right = st.columns(2)
@@ -392,13 +410,26 @@ def _sample_plan(conditions: tuple, ref: dict) -> None:
     n_ok_now, n_ng_now = conditions[0]
     can_say = wilson(0, n_ng_now)[1]
 
-    st.markdown("#### 必要な評価枚数")
+    st.markdown("#### 必要な評価枚数（概算）")
     cols = st.columns(2)
     cols[0].metric("欠陥（NG）", f"{need_ng:,} 枚",
-                   help="全数検出できた場合に、その見逃し率を言い切れる最小枚数")
+                   help="全数検出できた場合に、両側95% Wilson 上限がその見逃し率を"
+                        "下回る最小枚数")
     cols[1].metric("良品（OK）", f"{need_ok:,} 枚",
-                   help=f"この検出器の過検知率 {fp_rate*100:.1f}% を、"
-                        f"±{margin_pt:.1f}pt の精度で見積もるのに必要な枚数")
+                   help=f"過検知率を {fp_rate*100:.1f}% と**仮定**して、"
+                        f"±{margin_pt:.1f}pt の精度で見積もるのに要る概算枚数"
+                        "（正規近似 n = z²p(1-p)/margin²）")
+    st.caption(
+        "**どちらも仮定付きの概算である。** 欠陥側は「独立に抜き取った欠陥を"
+        "全数検出できたら」という条件つきの両側 95% Wilson 上限、良品側は"
+        f"過検知率を **{fp_rate*100:.1f}% と見込んだ**うえでの正規近似。"
+        "このアプリは疑似母集団の答えを知っているので後者を代入できるが、"
+        "**現場では真の過検知率は未知**で、手がかりが無ければ最も枚数が要る "
+        f"50% を置くのが安全側になる（この精度なら "
+        f"{required_n_for_margin(0.5, margin_pt / 100.0):,} 枚）。\n\n"
+        "有限母集団補正、ロット・設備・撮像条件によるかたより、"
+        "欠陥種別ごとの保証（下記）は、いずれもこの式に入っていない。"
+    )
 
     shortage = max(0, need_ng - n_ng_now)
     if shortage == 0:
@@ -425,13 +456,18 @@ def _sample_plan(conditions: tuple, ref: dict) -> None:
         rows.append({
             "評価サンプル数": condition_label(n_ok, n_ng),
             "全数検出したとき言えること": (
-                "評価不能（上限が 100% を下回らない）" if upper > 0.5
-                else f"見逃し率 {upper*100:.0f}% 以下"
+                f"見逃し率 {upper*100:.0f}% 以下"
+                + ("（実務判断には情報不足）" if upper > 0.5 else "")
             ),
             f"目標（{target_pct:.1f}% 以下）": "✅ 足りる" if upper <= target else "❌ 足りない",
             "不足している欠陥枚数": "—" if n_ng >= need_ng else f"{need_ng - n_ng:,} 枚",
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption(
+        "「言えること」は**両側 95% Wilson 上限**（＝上の必要枚数と同じ物差し）。"
+        "上限が 50% を超える条件に付けた「実務判断には情報不足」は"
+        "**本アプリの基準**であって、統計的に計算できないという意味ではない。"
+    )
 
     st.markdown("#### 段取りとしての答え（そのまま説明に使えます）")
     st.markdown(
@@ -683,19 +719,29 @@ def _summary_table(summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def _confidence_table(summary: pd.DataFrame) -> pd.DataFrame:
-    """「全数検出＝Recall 100%」を、NG 枚数ごとにどこまで信じてよいか。"""
+    """「全数検出＝Recall 100%」を、NG 枚数ごとにどこまで信じてよいか。
+
+    下限と上限は**同じ両側 95% Wilson 区間の両端**を使う（Wilson は左右対称
+    なので 1 - wilson(n,n) の下限 = wilson(0,n) の上限）。片方を Wilson、
+    片方を 3の法則にすると足して 100% にならない数字が並ぶので、3の法則は
+    別の推定法として参考列に分ける。
+    """
     rows = []
     for _, row in summary.iterrows():
         n_ng = int(row["n_ng"])
         low, _ = wilson(n_ng, n_ng)
-        upper = rule_of_three(n_ng)
+        upper = 1.0 - low
+        approx = rule_of_three(n_ng)
         rows.append({
             "評価サンプル数": row["condition"],
             "NG 枚数": f"{n_ng} 枚",
             "全数検出したときの表示": "Recall 100%",
             "実際の Recall の95%下限": pct(low),
-            "見逃し率の95%上限（3の法則）": (
-                "評価不能" if np.isnan(upper) or upper >= 1.0 else pct(upper)
+            "見逃し率の95%上限": (
+                pct(upper) + ("（実務判断には情報不足）" if upper > 0.5 else "")
+            ),
+            "参考: 3の法則（3÷n）": (
+                "—" if np.isnan(approx) or approx >= 1.0 else pct(approx)
             ),
         })
     return pd.DataFrame(rows)
@@ -704,8 +750,12 @@ def _confidence_table(summary: pd.DataFrame) -> pd.DataFrame:
 # --- 画面 -------------------------------------------------------------------
 def _pool_controls(data: AppData) -> tuple[int, int]:
     """母集団の作り方（大きさ・OK:NG比・引き直し）。戻り値は (比, OK側サイズ)。"""
+    # 初期値は 1。どのシードでも「枚数が増えるほどばらつきが減る」現象は同じに
+    # 出るが、シードによっては OK10・NG2 と OK20・NG4 の差がほとんど付かず、
+    # 初見で主張が伝わりにくい。教材の初期表示として差が見やすい母集団を選ぶ。
+    # 特定の引きに依存した結論でないことは「母集団を引き直す」で確認できる。
     if "pool_seed" not in st.session_state:
-        st.session_state.pool_seed = 0
+        st.session_state.pool_seed = 1
 
     left, mid, right = st.columns([2, 2, 2])
     with left:
@@ -1025,6 +1075,17 @@ def render(data: AppData) -> None:
         f"どちらも同じ検出器で、真の Recall は {pct(ref['recall'])} のまま変わっていない。"
         "**サンプルを増やして良くなるのは検出器ではなく、測定の確かさ**である。"
     )
+    n_ng_small = int(smallest["n_ng"])
+    naive = float(ref["recall"]) ** n_ng_small
+    st.caption(
+        f"※ {pct(smallest['recall_100_rate'])} は**この疑似母集団・この乱数条件で "
+        f"{n_repeat} 回試した実験値**であって、一般に成り立つ確率ではない。"
+        f"閾値を**先に固定**して独立な欠陥 {n_ng_small} 枚を評価するだけなら、"
+        f"全数検出になる確率は {pct(ref['recall'])} の {n_ng_small} 乗 ＝ "
+        f"**{pct(naive)}** にとどまる。差のぶんは、"
+        "**同じサンプルで閾値を決めて、同じサンプルで成績を出している**ことから来る"
+        "上乗せ（節 1 の「良く見えるほうへ偏る」）である。"
+    )
 
     st.divider()
     st.markdown("#### 「見逃しゼロ」をどこまで信じてよいか")
@@ -1034,9 +1095,16 @@ def render(data: AppData) -> None:
     )
     st.dataframe(_confidence_table(summary), hide_index=True, width="stretch")
     st.caption(
-        "「3の法則」… n 件で 1 件も見逃さなかったとき、見逃し率の 95% 上限は"
-        " およそ **3 ÷ n**。n が小さいと上限が 100% を下回らず、"
-        "**性能を評価できていない**ことになる。"
+        "下限も上限も**同じ両側 95% Wilson 信頼区間**の両端なので、"
+        "**足すと 100%** になる（Recall の下限を 100% から引いたものが"
+        "見逃し率の上限）。上限が 50% を超えるものに付けた"
+        "「実務判断には情報不足」は**本アプリの基準**であって、"
+        "統計的に計算できないという意味ではない — 数字は出るが、"
+        "その幅では合否を決められない、ということ。\n\n"
+        "「3の法則」（見逃し率の上限 ≒ **3 ÷ n**）は**片側** 95% 上限の暗算版で、"
+        "上限の列とは別の推定法。n が 14 前後で大小が入れ替わる"
+        "（n=8 なら 37% 対 32%、n=60 なら 5% 対 6%）。打ち合わせの目安には"
+        "使えるが、報告書では**どちらの方法で出した数字か**を明記すること。"
     )
 
     st.warning(

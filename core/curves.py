@@ -28,6 +28,23 @@ THRESHOLD_MODES: dict[str, str] = {
 GRID: np.ndarray = np.round(np.append(np.arange(0.0, 1.0 + 1e-9, 0.005), 1.01), 4)
 
 
+def f1_argmax(f1: np.ndarray) -> int:
+    """F1 が最大になる位置。**同点なら平坦区間の中央**を採る。
+
+    少数サンプルでは F1 の頂点が平らになり、最大値を取る閾値が 20 点近く
+    並ぶことがある（OK10・NG2 で平均 19.5 点 ＝ 幅 0.08）。`np.nanargmax` は
+    常にその左端＝最も低い閾値を返すため、「少数サンプルは低い閾値を選びがち」
+    という **規則由来の系統的な偏り** が入る。実測では中央値 0.432 に対し、
+    母集団の正解は 0.475 だった。中央を採ればこの偏りが消え、残るずれが
+    純粋に抜き取りのばらつきになる。
+
+    同点が飛び飛びの場合も含めて「同点位置の中央」を採る（偶数個なら上側）。
+    全て NaN のときは呼び出し側で先に弾くこと。
+    """
+    tied = np.flatnonzero(f1 == np.nanmax(f1))
+    return int(tied[len(tied) // 2])
+
+
 @dataclass(frozen=True)
 class Sweep:
     """各閾値での混同行列と指標を配列でまとめたもの。"""
@@ -100,17 +117,21 @@ def choose_threshold(
     """決定モードに従って閾値を1つ選ぶ。
 
     - manual    : スライダーの値をそのまま使う
-    - f1_max    : F1 が最大の閾値
+    - f1_max    : F1 が最大の閾値。**同点なら平坦区間の中央**（f1_argmax）
     - zero_miss : 見逃し0（FN==0）を満たす中で最大の閾値（＝過検知が最小）
     - fpr_cap   : 過検知率(FPR) <= 上限 を満たす中で最小の閾値（＝Recall 最大）
-    - cost_min  : cost_fp*FP + cost_fn*FN が最小の閾値
+    - cost_min  : cost_fp*FP + cost_fn*FN が最小の閾値。
+                  **同点なら最も低い閾値**（＝見逃しが少ない側）を採る
+
+    同点規則はどのモードも上記で固定する。曲線が平らなときにどこを採るかで
+    結果が動くので、暗黙の argmin/argmax 任せにしない。
     """
     if mode == "manual":
         return manual
     if mode == "f1_max":
         if np.all(np.isnan(sw.f1)):
             return manual
-        return float(sw.thresholds[np.nanargmax(sw.f1)])
+        return float(sw.thresholds[f1_argmax(sw.f1)])
     if mode == "zero_miss":
         ok = sw.fn == 0
         if not ok.any():  # どの閾値でも見逃しが残る（NGが極端に低スコア）

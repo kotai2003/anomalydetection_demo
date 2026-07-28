@@ -20,7 +20,7 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 
-from .curves import GRID
+from .curves import GRID, f1_argmax
 from .distributions import DistributionSpec, generate_scores
 
 # 評価データの OK:NG 比（OK が NG の何倍か）。**1回の実験の中では全条件で共通。**
@@ -95,7 +95,14 @@ def _counts_on_grid(
 
 
 def _f1_on_grid(fp: np.ndarray, tp: np.ndarray, n_ng: int) -> np.ndarray:
-    """全閾値での F1。NG と判定したものが 0 件の閾値は NaN（metrics_at と同じ）。"""
+    """全閾値での F1。NG と判定したものが 0 件の閾値は NaN（metrics_at と同じ）。
+
+    NG が 1 件も無い場合も全て NaN。ここを 0 にすると、Recall が計算不能でも
+    F1 だけ 0 として最大値が決まってしまい、metrics_at 経由の curves 側と
+    答えが食い違う（アプリ上は n_ng >= 1 なので現れないが、規則は揃える）。
+    """
+    if n_ng == 0:
+        return np.full(len(fp), np.nan)
     fn = n_ng - tp
     denominator = 2 * tp + fp + fn
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -105,12 +112,16 @@ def _f1_on_grid(fp: np.ndarray, tp: np.ndarray, n_ng: int) -> np.ndarray:
 
 
 def f1_max_threshold(ok_scores, ng_scores, grid: np.ndarray = GRID) -> float:
-    """F1 が最大になる閾値。core.curves.choose_threshold("f1_max") と同じ値を返す。"""
+    """F1 が最大になる閾値。core.curves.choose_threshold("f1_max") と同じ値を返す。
+
+    同点規則も curves と共有する（f1_argmax）。ここだけ別の規則にすると、
+    タブ③の「F1 最大」とタブ④の「正解の閾値」が食い違う。
+    """
     fp, tp = _counts_on_grid(ok_scores, ng_scores, grid)
     f1 = _f1_on_grid(fp, tp, len(ng_scores))
     if np.all(np.isnan(f1)):
         return float("nan")
-    return float(grid[np.nanargmax(f1)])
+    return float(grid[f1_argmax(f1)])
 
 
 def _metrics_row(fp: int, tp: int, n_ok: int, n_ng: int) -> dict[str, float]:
@@ -160,7 +171,7 @@ def repeat_experiment(
         f1_grid = _f1_on_grid(fp_grid, tp_grid, n_ng)
         if np.all(np.isnan(f1_grid)):
             continue
-        best = int(np.nanargmax(f1_grid))
+        best = f1_argmax(f1_grid)
 
         row = {"trial": trial, "n_ok": n_ok, "n_ng": n_ng,
                "condition": condition_label(n_ok, n_ng),
