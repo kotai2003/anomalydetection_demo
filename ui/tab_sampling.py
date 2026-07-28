@@ -513,11 +513,13 @@ def pool_figure(
             line_width=0, layer="below",
         )
         fig.add_vline(x=threshold, line=dict(color=INK, width=2, dash="dash"))
+        # 凡例（上辺）と重なるので、ラベルは枠の外に出さず線の右内側へ置く。
         fig.add_annotation(
-            x=threshold, y=1.02, yref="y domain",
+            x=threshold, y=0.97, yref="y domain",
             text=f"母集団での正解の閾値 {threshold:.3f}",
-            showarrow=False, yanchor="bottom",
+            showarrow=False, yanchor="top", xanchor="left", xshift=6,
             font=dict(color=INK, size=13, family=FONT),
+            bgcolor="rgba(252,252,251,0.85)",
         )
 
     fig.update_layout(
