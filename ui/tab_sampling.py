@@ -177,6 +177,7 @@ def _single_draw(
     conditions: tuple,
     n_repeat: int,
     ref_threshold: float,
+    experiments: pd.DataFrame,
 ) -> None:
     """箱ひげ図の点 1 つ（＝1 回の抜き取り）を開いて、閾値が決まる過程を見せる。
 
@@ -217,9 +218,22 @@ def _single_draw(
     f1_max = float(np.nanmax(sw.f1)) if not np.all(np.isnan(sw.f1)) else np.nan
     gap = t_star - ref_threshold
 
+    # 箱ひげ図の「箱の中の横線＝中央値」と、ここで見せている「1 回ぶん」を
+    # 取り違えやすい。両方の数字を並べて、違って当たり前だと明示する。
+    same = experiments.loc[experiments["condition"] == chosen, "threshold"]
+    median = float(same.median())
+    rank = int((same < t_star).sum()) + 1
+
     st.caption(
         f"**{chosen} の {trial + 1} 回目の抜き取り**（箱ひげ図の点 1 つにあたる）。"
         "母集団に対してやったのと同じ 4 つの図を、この数枚だけに対して行う。"
+    )
+    st.warning(
+        f"**上の箱ひげ図と数字が違って当たり前です。** 箱の中の横線は "
+        f"**{len(same)} 回の中央値 {median:.3f}**、ここで見ているのは"
+        f"**そのうちの 1 回だけ**（{trial + 1} 回目・閾値 {t_star:.3f}）。"
+        f"この回は {len(same)} 回中、低いほうから {rank} 番目にあたる。"
+        "「別の抜き取りを見る」を押すと、箱ひげ図の別の点へ移る。"
     )
 
     hist_col, note_col = st.columns([2, 1])
@@ -820,12 +834,19 @@ def render(data: AppData) -> None:
         "**黒い破線が正解**。左の条件ほど箱が縦に長い＝"
         "同じラインを測っているのに、たまたま選んだサンプルで答えが変わっている。"
     )
+    st.caption(
+        f"箱の読み方: **箱の中の横線が {n_repeat} 回の中央値**、箱の上下が"
+        "上位25%・下位25%の境目、ヒゲがそこから 1.5 倍の範囲、"
+        "外の点が外れ値。つまり**箱ひげ図の数字は「{n_repeat}回まとめた要約」**であって、"
+        "1 回ぶんの値ではない。".replace("{n_repeat}", str(n_repeat))
+    )
 
     with st.expander(
         "▸ この点 1 つ（＝1 回の抜き取り）の中で何が起きているか"
         "（分布 → ROC → 混同行列 → F1）"
     ):
-        _single_draw(ok_pool, ng_pool, conditions, n_repeat, ref["threshold"])
+        _single_draw(ok_pool, ng_pool, conditions, n_repeat, ref["threshold"],
+                     experiments)
 
     st.plotly_chart(
         overlay_figure(experiments, summary["condition"].iloc[0],
