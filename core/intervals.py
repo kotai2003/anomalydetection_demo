@@ -28,6 +28,36 @@ def wilson(successes: int, n: int, confidence: float = 0.95) -> tuple[float, flo
     return max(0.0, center - half_width), min(1.0, center + half_width)
 
 
+def required_n_zero_events(max_rate: float, confidence: float = 0.95) -> int:
+    """見逃し 0 件で「見逃し率は max_rate 以下」と言い切るのに必要な評価件数。
+
+    p = 0 のとき Wilson 上限は z² / (n + z²) に簡約されるので、閉じた式で解ける。
+
+        z² / (n + z²) <= max_rate   ⟺   n >= z² (1 - max_rate) / max_rate
+
+    「3の法則（n ≈ 3 / 率）」はこの式の暗算版にあたる（z² ≈ 3.84）。
+    """
+    if not 0.0 < max_rate < 1.0:
+        return 0
+    z = norm.isf((1.0 - confidence) / 2.0)
+    return math.ceil(z * z * (1.0 - max_rate) / max_rate)
+
+
+def required_n_for_margin(
+    rate: float, margin: float, confidence: float = 0.95
+) -> int:
+    """比率 rate を ±margin の精度で見積もるのに必要な件数。
+
+    標準的な正規近似 n = z² p(1-p) / margin²。品質部門が見慣れた式でもある。
+    この範囲では Wilson 区間の半幅ともほぼ一致する。
+    """
+    if margin <= 0.0:
+        return 0
+    z = norm.isf((1.0 - confidence) / 2.0)
+    p = min(max(rate, 0.0), 1.0)
+    return math.ceil(z * z * p * (1.0 - p) / (margin * margin))
+
+
 def rule_of_three(n: int) -> float:
     """「3の法則」— n 件で見逃し 0 件だったときの、見逃し率のおおよその95%上限。
 

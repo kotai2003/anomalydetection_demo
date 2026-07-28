@@ -24,7 +24,12 @@ import streamlit as st
 
 from core.curves import roc_auc, sweep
 from core.distributions import DistributionSpec
-from core.intervals import rule_of_three, wilson
+from core.intervals import (
+    required_n_for_margin,
+    required_n_zero_events,
+    rule_of_three,
+    wilson,
+)
 from core.metrics import confusion_at, metrics_at
 from core.sampling import (
     DEFAULT_OK_NG_RATIO,
@@ -300,6 +305,152 @@ def _single_draw(
         "同じ検出器なのに、選ばれる閾値も報告される Recall も毎回変わる。"
         "条件を OK300・NG60 に変えて同じことをすると、変わり方が小さくなる。"
         "上の箱ひげ図は、これを 100 回ぶん重ねたものにあたる。"
+    )
+
+
+def requirement_figure(target: float, need_ng: int) -> go.Figure:
+    """「言いたい見逃し率」と「必要な欠陥枚数」の関係。いま選んだ点を赤で示す。"""
+    rates = np.arange(0.005, 0.205, 0.0025)
+    needs = [required_n_zero_events(float(r)) for r in rates]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=rates * 100, y=needs, mode="lines", name="必要な欠陥枚数",
+            line=dict(color=OK_COLOR, width=2.5),
+            hovertemplate="見逃し率 %{x:.1f}% 以下と言うには<br>"
+                          "欠陥 %{y} 枚<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[target * 100], y=[need_ng], mode="markers+text",
+            name="いまの設定",
+            marker=dict(color=MARKER_RED, size=15,
+                        line=dict(width=2, color=SURFACE)),
+            text=[f" {need_ng} 枚"], textposition="middle right",
+            textfont=dict(color=MARKER_RED, size=14, family=FONT),
+            hovertemplate=f"いまの設定<br>見逃し率 {target*100:.1f}% 以下"
+                          f"<br>欠陥 {need_ng} 枚<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=dict(text="厳しく言い切るほど、欠陥は多く要る",
+                   font=dict(family=FONT, color=INK, size=15), x=0),
+        height=340,
+        margin=dict(t=48, r=16, b=48, l=64),
+        paper_bgcolor=SURFACE,
+        plot_bgcolor=SURFACE,
+        font=dict(family=FONT, color=INK_SECONDARY, size=12),
+        showlegend=False,
+    )
+    fig.update_xaxes(
+        title_text="「見逃し率は◯% 以下」と言いたい水準", ticksuffix="%",
+        gridcolor=GRID, zeroline=False, linecolor="#c3c2b7",
+        tickfont=dict(color=INK_MUTED),
+    )
+    fig.update_yaxes(
+        title_text="必要な欠陥の枚数", gridcolor=GRID, zeroline=False,
+        linecolor="#c3c2b7", tickfont=dict(color=INK_MUTED), rangemode="tozero",
+    )
+    return fig
+
+
+def _sample_plan(conditions: tuple, ref: dict) -> None:
+    """「で、何枚用意すればいいのか」に一言で答える節。
+
+    降水確率ではなく傘の要否を言う。品質要求（許容見逃し率・過検知率の精度）を
+    入れてもらい、必要枚数と、いまの枚数で足りるかどうかを断定形で返す。
+    """
+    st.caption(
+        "ここまでは「その数字がどれくらいアテになるか」の話だった。"
+        "最後に、**では何枚用意すればよいのか**に答える。必要枚数は"
+        "**母集団の大きさでは決まらない**（2,000 個でも 10 万個でもほぼ同じ）。"
+        "決めるのは「**どこまで言い切りたいか**」だけ。"
+    )
+
+    left, right = st.columns(2)
+    with left:
+        target_pct = st.slider(
+            "「見逃し率は◯% 以下」と言えれば合格ですか", 1.0, 20.0, 5.0, 0.5,
+            format="%.1f%%", key="plan_miss",
+            help="品質保証部門と合意すべき数字。ここが決まらないと必要枚数は決まらない。",
+        )
+    with right:
+        margin_pt = st.slider(
+            "過検知率を ±何ポイントで知りたいですか", 1.0, 10.0, 2.5, 0.5,
+            format="±%.1fpt", key="plan_margin",
+            help="再検査の工数見積もりをどこまで詰めたいか。良品の必要枚数を決める。",
+        )
+
+    target = target_pct / 100.0
+    need_ng = required_n_zero_events(target)
+    fp_rate = 1.0 - ref["specificity"] if not np.isnan(ref["specificity"]) else 0.05
+    need_ok = required_n_for_margin(max(fp_rate, 0.01), margin_pt / 100.0)
+
+    # いま比較している中でいちばん少ない条件＝初期評価にあたる条件で判定する
+    n_ok_now, n_ng_now = conditions[0]
+    can_say = wilson(0, n_ng_now)[1]
+
+    st.markdown("#### 必要な評価枚数")
+    cols = st.columns(2)
+    cols[0].metric("欠陥（NG）", f"{need_ng:,} 枚",
+                   help="全数検出できた場合に、その見逃し率を言い切れる最小枚数")
+    cols[1].metric("良品（OK）", f"{need_ok:,} 枚",
+                   help=f"この検出器の過検知率 {fp_rate*100:.1f}% を、"
+                        f"±{margin_pt:.1f}pt の精度で見積もるのに必要な枚数")
+
+    shortage = max(0, need_ng - n_ng_now)
+    if shortage == 0:
+        st.success(
+            f"**いまの {n_ok_now}・{n_ng_now} 枚で足ります。** 全数検出できれば"
+            f"「見逃し率は {target_pct:.1f}% 以下」と報告できます。"
+        )
+    else:
+        st.error(
+            f"**欠陥をあと {shortage:,} 枚 集めてください。**（いま {n_ng_now} 枚 → "
+            f"{need_ng:,} 枚）\n\n"
+            f"いまの {n_ng_now} 枚では、全部検出できても言えるのは"
+            f"**「見逃し率 {can_say*100:.0f}% 以下」まで**で、"
+            f"目標の {target_pct:.1f}% には届きません。"
+            "**枚数が足りないのであって、AI の性能が足りないのではありません。**"
+        )
+
+    st.plotly_chart(requirement_figure(target, need_ng))
+
+    st.markdown("#### いま比べている条件で、何が言えるか")
+    rows = []
+    for n_ok, n_ng in conditions:
+        upper = wilson(0, n_ng)[1]
+        rows.append({
+            "評価サンプル数": condition_label(n_ok, n_ng),
+            "全数検出したとき言えること": (
+                "評価不能（上限が 100% を下回らない）" if upper > 0.5
+                else f"見逃し率 {upper*100:.0f}% 以下"
+            ),
+            f"目標（{target_pct:.1f}% 以下）": "✅ 足りる" if upper <= target else "❌ 足りない",
+            "不足している欠陥枚数": "—" if n_ng >= need_ng else f"{need_ng - n_ng:,} 枚",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    st.markdown("#### 段取りとしての答え（そのまま説明に使えます）")
+    st.markdown(
+        "| 工程 | 目的 | 枚数の目安 | 言ってよいこと |\n"
+        "|---|---|---|---|\n"
+        "| **初期評価** | 検出できるかの確認 | 欠陥 数枚〜 | 「確認した範囲では検出できた」 |\n"
+        "| **閾値調整** | 暫定閾値を決める | OK・NG 両方 | ここでの成績は**報告しない** |\n"
+        f"| **独立評価** | 性能を保証する | **OK {need_ok:,} ・ NG {need_ng:,}** | "
+        f"「見逃し率 {target_pct:.1f}% 以下」 |\n"
+        "| **量産パイロット** | 実ラインで確認 | 1,000〜5,000 個 | 従来検査と並行運転して実績を積む |\n"
+    )
+    st.info(
+        f"**必要なのは「欠陥 {need_ng:,} 枚」ではなく「欠陥種別ごとに {need_ng:,} 枚」です。** "
+        "キズだけ集めても、打痕や欠けの見逃し率は別に保証が要ります。"
+        "総数だけ揃えると、簡単な欠陥が多いぶん成績が良く見えるだけになります。"
+        "サンプル計画では、**種別・大きさ・位置・境界品**の内訳を先に決めてください。\n\n"
+        f"**すぐ {need_ng:,} 枚が集まらない場合**は、従来検査との並行運転（量産パイロット）で"
+        "実績を積むのが現実解です。AI 単独判定を先に外しておけば、"
+        "欠陥が貯まるまでの間もリスクを取らずに済みます。"
     )
 
 
@@ -891,3 +1042,7 @@ def render(data: AppData) -> None:
         "量産へ持ち込む閾値は、少数サンプルで決めた暫定値ではなく、"
         "十分な枚数の独立した評価データを通過した固定値である必要がある。"
     )
+
+    st.divider()
+    st.markdown("### 5. で、結局いま何枚用意すればいいのか")
+    _sample_plan(conditions, ref)
