@@ -23,11 +23,13 @@ CONFUSION_CELLS = (
 )
 
 
-def confusion_figure(cm, threshold: float) -> go.Figure:
+def confusion_figure(cm, threshold: float, *, height: int = 560, title: str = "") -> go.Figure:
     """混同行列を Blues ヒートマップで描く（社内の既存出力と同じ形式）。
 
     行 = 実際 (True) / 列 = AI判定 (Predicted)、左上を TN として
     Good/Bad が左上→右下に並ぶ向きに揃える。
+
+    height / title は、タブ④が母集団に対して同じ図を狭い幅で使うためのもの。
     """
     z = [[cm.tn, cm.fp], [cm.fn, cm.tp]]
     labels = ["OK（良品）", "NG（欠陥）"]
@@ -78,11 +80,11 @@ def confusion_figure(cm, threshold: float) -> go.Figure:
 
     fig.update_layout(
         title=dict(
-            text=f"混同行列（閾値 {threshold:.2f}）",
+            text=title or f"混同行列（閾値 {threshold:.2f}）",
             font=dict(family=FONT, color=INK, size=16),
             x=0,
         ),
-        height=560,
+        height=height,
         margin=dict(t=56, r=16, b=56, l=16),
         paper_bgcolor=SURFACE,
         plot_bgcolor=SURFACE,

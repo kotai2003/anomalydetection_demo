@@ -22,8 +22,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from core.curves import roc_auc, sweep
 from core.distributions import DistributionSpec
 from core.intervals import rule_of_three, wilson
+from core.metrics import confusion_at, metrics_at
 from core.sampling import (
     DEFAULT_OK_NG_RATIO,
     DEFAULT_POOL_OK_SIZE,
@@ -38,6 +40,12 @@ from core.sampling import (
     summarize,
 )
 from ui.sidebar import AppData
+
+# 「正解の閾値がどう決まったか」は、タブ②③で使ったのと同じ図を母集団に
+# 当てて見せる。同じ道具の使い回しであること自体が説明になるので、
+# 「図はそのタブが持つ」という原則をここだけ意図的に外して借りている。
+from ui.tab_curves import f1_figure, roc_figure
+from ui.tab_matrix import confusion_figure
 from ui.theme import (
     F1_COLOR,
     FONT,
@@ -87,6 +95,70 @@ def _run_experiments(
     ok_pool: np.ndarray, ng_pool: np.ndarray, conditions: tuple, n_repeat: int
 ) -> pd.DataFrame:
     return run_conditions(ok_pool, ng_pool, conditions, n_repeat, seed=EXPERIMENT_SEED)
+
+
+@st.cache_data(show_spinner=False)
+def _pool_sweep(ok_pool: np.ndarray, ng_pool: np.ndarray):
+    """母集団に対する閾値スイープと AUC。タブ③と同じ core.curves を使う。"""
+    return sweep(ok_pool, ng_pool), roc_auc(ok_pool, ng_pool)
+
+
+def _derivation(ok_pool: np.ndarray, ng_pool: np.ndarray, threshold: float) -> None:
+    """「正解の閾値」がどう決まったかを ROC → 混同行列 → F1 の順で見せる。"""
+    sw, auc = _pool_sweep(ok_pool, ng_pool)
+    cm = confusion_at(ok_pool, ng_pool, threshold)
+    m = metrics_at(cm)
+    fpr = cm.fp / (cm.fp + cm.tn)
+    f1_max = float(np.nanmax(sw.f1)) if not np.all(np.isnan(sw.f1)) else np.nan
+
+    st.caption(
+        "タブ②③で使ったのと同じ 3 つの図を、今度は**母集団に対して**当てている。"
+        "違うのは対象だけで、やっていることは同じ。"
+    )
+
+    roc_col, cm_col = st.columns(2)
+    with roc_col:
+        st.markdown("**ステップ1: この検出器の実力を見る（ROC 曲線）**")
+        st.plotly_chart(roc_figure(sw, auc, fpr, m["recall"]))
+        st.caption(
+            f"AUC = {auc:.3f}。閾値をどこに置くかとは無関係な、"
+            "**検出器そのものの実力**。赤い点が下で選ばれる正解の閾値の位置。"
+        )
+    with cm_col:
+        st.markdown("**ステップ2: ある閾値で切った内訳を見る（混同行列）**")
+        st.plotly_chart(
+            confusion_figure(
+                cm, threshold, height=380,
+                title=f"母集団を閾値 {threshold:.3f} で切った結果",
+            )
+        )
+        st.caption(
+            f"過検知 {cm.fp:,} 件・見逃し {cm.fn:,} 件。"
+            "閾値を動かすとこの 4 つの数が動き、そこから Recall・Precision、"
+            "そして **F1 が計算される**。"
+        )
+
+    f1_col, note_col = st.columns([2, 1])
+    with f1_col:
+        st.markdown("**ステップ3: 全部の閾値で F1 を計算し、頂点を採る（F1 曲線）**")
+        st.plotly_chart(f1_figure(sw, threshold, threshold, f1_max, True, True))
+    with note_col:
+        st.write("")
+        st.markdown(
+            "閾値を 0 から 1 まで動かし、**そのつどステップ2 の混同行列を作って "
+            "F1 を計算**したものがこの曲線。\n\n"
+            f"F1 が最大（{f1_max:.3f}）になったのが **閾値 {threshold:.3f}** で、"
+            "これを「正解」と呼んでいる。\n\n"
+            "Recall（青）は閾値を下げるほど上がり、Precision（橙）は上げるほど"
+            "上がる。**両方が釣り合うあたり**が頂点になる。"
+        )
+    st.info(
+        "**「正解」と呼んでいるのは、あくまで F1 を最大にする閾値である。** "
+        "見逃しを何としても避けたいなら、もっと左（低い閾値）を選ぶことになる。"
+        "どこを選ぶかは品質方針の問題で、数学が決めるわけではない — "
+        "これはタブ③で見たとおり。ここでは**少数サンプルでも同じ狙いを"
+        "定められるか**を問題にしているので、狙いを F1 最大に固定している。"
+    )
 
 
 def _parse_ok_counts(raw_values, limit: int) -> tuple[list[int], list[str]]:
@@ -524,6 +596,12 @@ def render(data: AppData) -> None:
         "以下では「答えを知っている状態」で、少数の抜き取りが答えをどれだけ"
         "外すかを確かめる。"
     )
+
+    with st.expander(
+        f"▸ この「正解の閾値 {ref['threshold']:.3f}」はどう決まったのか"
+        "（ROC 曲線 → 混同行列 → F1 曲線）"
+    ):
+        _derivation(ok_pool, ng_pool, ref["threshold"])
 
     st.divider()
     st.markdown("### 2. タブ①〜③とどこが違うのか")
