@@ -34,21 +34,27 @@ DEFAULT_OK_NG_RATIO = 5
 # 反復実験が対話的な速さで終わる大きさ。NG 側は上の比から決まり、
 # 抜き取りと同じ欠陥割合になる — これで母集団の F1最大閾値が、
 # そのまま各試行の「正解」になる。
-POOL_OK_SIZE = 2000
+DEFAULT_POOL_OK_SIZE = 2000
+POOL_OK_SIZE_OPTIONS: tuple[int, ...] = (500, 1000, 2000, 5000)
 
-# 1条件で抜き取れる OK の上限。母集団の半分を超えると抜き取りのばらつきが
-# ほとんど無くなり、「少数サンプルの問題」を見る図として意味を失う。
-MAX_EVAL_OK = POOL_OK_SIZE // 2
+
+def pool_ng_size(ratio: int, pool_ok_size: int = DEFAULT_POOL_OK_SIZE) -> int:
+    """母集団の NG 側サイズ。抜き取りと同じ欠陥割合になるよう比から決める。"""
+    return max(1, round(pool_ok_size / ratio))
+
+
+def max_eval_ok(pool_ok_size: int = DEFAULT_POOL_OK_SIZE) -> int:
+    """1条件で抜き取れる OK の上限。
+
+    母集団の半分を超えると毎回ほぼ同じサンプルになり、抜き取りのばらつきが
+    消える。「少数サンプルの問題」を見る図として意味を失うので上限を置く。
+    """
+    return pool_ok_size // 2
 
 # 反復実験で使う OK 枚数の既定値（構想書の 10/20/50/100/最大に対応）。
 # NG 枚数は比から決まる。既定比 5:1 での先頭は、初期評価で実際に
 # 採られがちな OK10・NG2。
 PRESET_OK_COUNTS: tuple[int, ...] = (10, 20, 50, 100, 300)
-
-
-def pool_ng_size(ratio: int) -> int:
-    """母集団の NG 側サイズ。抜き取りと同じ欠陥割合になるよう比から決める。"""
-    return max(1, round(POOL_OK_SIZE / ratio))
 
 
 def conditions_for(ok_counts, ratio: int) -> tuple[tuple[int, int], ...]:
